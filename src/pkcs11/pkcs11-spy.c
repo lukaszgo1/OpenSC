@@ -64,6 +64,8 @@ static void *modhandle = NULL;
 /* Spy module output */
 static FILE *spy_output = NULL;
 
+static bool searching_for_private_keys = false;
+
 static void *
 allocate_function_list(int v)
 {
@@ -801,6 +803,7 @@ C_GetTokenInfo(CK_SLOT_ID slotID,
 	if(rv == CKR_OK) {
 		spy_dump_desc_out("pInfo");
 		print_token_info(spy_output, pInfo);
+		pInfo->ulMaxSessionCount = 3;
 	}
 	return retne(rv);
 }
@@ -1070,7 +1073,25 @@ C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject,
 	rv = po->C_GetAttributeValue(hSession, hObject, pTemplate, ulCount);
 	if (rv == CKR_OK || rv == CKR_ATTRIBUTE_SENSITIVE ||
 			rv == CKR_ATTRIBUTE_TYPE_INVALID || rv == CKR_BUFFER_TOO_SMALL)
-		spy_attribute_list_out("pTemplate", pTemplate, ulCount);
+		spy_attribute_list_out("pTemplate before potential modification is", pTemplate, ulCount);
+	bool template_modified = false;
+	CK_ULONG attribute_index = 0;
+	for (attribute_index = 0; attribute_index < ulCount; attribute_index++) {
+		switch (pTemplate[attribute_index].type) {
+			case CKA_TOKEN:
+			case CKA_EXTRACTABLE:
+				if (0 == pTemplate[attribute_index].ulValueLen) {
+					pTemplate[attribute_index].ulValueLen = sizeof(CK_BBOOL);
+					template_modified = true;
+				}
+				break;
+			default:
+				continue;
+		}
+	}
+	if (template_modified) {
+		spy_attribute_list_out("pTemplate after modification is", pTemplate, ulCount);
+	}
 	return retne(rv);
 }
 
@@ -1096,6 +1117,55 @@ C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTemplate, CK_ULO
 	enter("C_FindObjectsInit");
 	spy_dump_ulong_in("hSession", hSession);
 	spy_attribute_list_in("pTemplate", pTemplate, ulCount);
+
+	bool is_cka_token = false;
+	bool class_is_secret_key = false;
+	bool class_is_private_key = false;
+	bool class_is_certificate = false;
+	bool is_check_for_a_subject = false;
+	CK_ULONG i;
+	for (i = 0; i < ulCount; i++) {
+		if (pTemplate[i].type == CKA_CLASS) {
+			fprintf(spy_output, "Attribute is a class - checking its type.\n");
+			if (pTemplate[i].ulValueLen > 0) {
+				switch (*((CK_ULONG_PTR)pTemplate[i].pValue)) {
+					case CKO_SECRET_KEY:
+						class_is_secret_key = true;
+						break;
+					case CKO_PRIVATE_KEY:
+						class_is_private_key = true;
+						break;
+					case CKO_CERTIFICATE:
+						class_is_certificate = true;
+						break;
+				}
+			}
+		}
+		else if (pTemplate[i].type == CKA_SUBJECT && pTemplate[i].ulValueLen > 0 ) {
+			is_check_for_a_subject = true;
+		}
+		else if (pTemplate[i].type == CKA_TOKEN) {
+			fprintf(spy_output, "Checking if object is a token.\n");
+			if (pTemplate[i].ulValueLen > 0  && *((CK_BYTE *)pTemplate[i].pValue)) {
+				fprintf(spy_output, "Template verifies if object is a token.\n");
+				is_cka_token = true;
+			}
+		}
+	}
+	bool should_create_empty_search = (
+		(is_cka_token && class_is_secret_key)
+		|| (is_cka_token && class_is_certificate &&  is_check_for_a_subject)
+	);
+	if (should_create_empty_search) {
+		fprintf(spy_output, "Creating an empty search, as the template is not supported.\n");
+		CK_ATTRIBUTE attrs[10];
+		rv = po->C_FindObjectsInit(hSession, attrs, 0);
+		return retne(rv);
+	}
+	if (class_is_private_key) {
+		fprintf(spy_output, "Will limit found objects to matching private keys.\n");
+		searching_for_private_keys = true;
+	}
 	rv = po->C_FindObjectsInit(hSession, pTemplate, ulCount);
 	return retne(rv);
 }
@@ -1105,12 +1175,23 @@ C_FindObjects(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE_PTR phObject, CK_ULON
 		CK_ULONG_PTR  pulObjectCount)
 {
 	CK_RV rv;
+	static unsigned int find_calls_for_private_keys_count = 0;
 
 	enter("C_FindObjects");
 	spy_dump_ulong_in("hSession", hSession);
 	spy_dump_ulong_in("ulMaxObjectCount", ulMaxObjectCount);
 	rv = po->C_FindObjects(hSession, phObject, ulMaxObjectCount, pulObjectCount);
 	if (rv == CKR_OK) {
+		if (searching_for_private_keys) {
+			++find_calls_for_private_keys_count;
+		}
+		if (find_calls_for_private_keys_count > 1) {
+			fprintf(spy_output, "Ignoring results from further find calls for private keys.\n");
+			find_calls_for_private_keys_count = 0;
+			searching_for_private_keys = false;
+			*pulObjectCount = 0;
+			return retne(rv);
+		}
 		CK_ULONG          i;
 		spy_dump_ulong_out("ulObjectCount", *pulObjectCount);
 		for (i = 0; i < *pulObjectCount; i++)
