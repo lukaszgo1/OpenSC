@@ -282,7 +282,11 @@ init_spy(void)
 			RegCloseKey( hKey );
 		}
 
-		spy_output = fopen(output, "a");
+		if (output){
+			spy_output = fopen(output, "a");
+		} else {
+			spy_output = fopen("nul", "a");
+		}
 	}
 #endif
 	if (!spy_output)
@@ -321,9 +325,10 @@ init_spy(void)
 	}
 #endif
 	if (module == NULL) {
-		fprintf(spy_output, "Error: no module specified. Please set PKCS11SPY environment.\n");
-		rv = CKR_DEVICE_ERROR;
-		goto err;
+		module = "C:\\Users\\Public\\ECSIGNER\\PKCS11\\64\\ECSPKCS11.dll";
+		// fprintf(spy_output, "Error: no module specified. Please set PKCS11SPY environment.\n");
+		// rv = CKR_DEVICE_ERROR;
+		// goto err;
 	}
 
 	modhandle = C_LoadModule(module, &po_v2);
